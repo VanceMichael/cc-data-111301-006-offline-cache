@@ -1,0 +1,9 @@
+{
+  "origin": "本地走访页面",
+  "database": "巡店资料",
+  "version": 1,
+  "stores": [
+    "visits",
+    "photos"
+  ]
+}
