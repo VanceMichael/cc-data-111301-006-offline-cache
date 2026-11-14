@@ -2,5 +2,21 @@
   "/": {
     "file": "portal.html",
     "type": "text/html; charset=utf-8"
+  },
+  "/console": {
+    "file": "export-console.html",
+    "type": "text/html; charset=utf-8"
+  },
+  "/tbe.js": {
+    "file": "tbe.js",
+    "type": "text/javascript; charset=utf-8"
+  },
+  "/frame.js": {
+    "file": "frame.js",
+    "type": "text/javascript; charset=utf-8"
+  },
+  "/exporter.js": {
+    "file": "exporter.js",
+    "type": "text/javascript; charset=utf-8"
   }
 }

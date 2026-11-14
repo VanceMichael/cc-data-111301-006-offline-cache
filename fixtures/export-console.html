@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>本地资料授权导出控制台</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; color: #1c2733; }
+  fieldset { margin: 16px 0; padding: 14px 18px; border: 1px solid #c6d0da; border-radius: 8px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid #d4dce4; padding: 6px 9px; text-align: left; font-size: 13px; }
+  th { background: #f2f5f8; }
+  input[type=text], input[type=number] { width: 320px; padding: 5px; }
+  button { padding: 7px 16px; margin-right: 8px; border-radius: 6px; border: 1px solid #2b6cb0;
+           background: #2b6cb0; color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: #2b6cb0; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  code { background: #f2f5f8; padding: 1px 5px; border-radius: 4px; }
+  .muted { color: #5b6b7b; font-size: 12px; }
+  .ok { color: #1a7f37; } .bad { color: #c0392b; } .warn { color: #b7791f; }
+  #log { white-space: pre-wrap; background: #1c2733; color: #d6e2ee; padding: 12px;
+         border-radius: 8px; max-height: 260px; overflow: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>本地资料授权导出</h1>
+<p class="muted">
+  本页只读取<strong>当前站点源</strong>内的 IndexedDB，不访问其他站点或本机目录。
+  资料通过本机回环接收端分块交接，每块都有接收确认；一次导出使用单个只读事务，
+  读取的是事务开始瞬间的一致性快照，导出期间页面的写入不会混入本次结果。
+</p>
+
+<fieldset>
+  <legend>1. 连接本机接收端</legend>
+  <label>接收端地址 <input id="endpoint" type="text" value="http://127.0.0.1:8765"></label><br><br>
+  <label>访问令牌 <input id="token" type="text" placeholder="粘贴 receive 命令显示的 token"></label><br><br>
+  <button id="ping" class="secondary">测试连接</button>
+  <span id="pingResult" class="muted"></span>
+</fieldset>
+
+<fieldset>
+  <legend>2. 读取可见数据库与对象仓库结构</legend>
+  <button id="scan">扫描数据库</button>
+  <div id="schema"></div>
+</fieldset>
+
+<fieldset>
+  <legend>3. 选择本次资料范围并导出</legend>
+  <label>分块目标大小（字节）<input id="chunkBytes" type="number" value="4194304" min="65536"></label>
+  <p class="muted">照片 Blob 按原始字节直传，不做 base64；块大小控制单次交接与内存占用。</p>
+  <button id="export" disabled>开始导出所选 store</button>
+  <div id="progress" class="muted"></div>
+</fieldset>
+
+<fieldset>
+  <legend>运行日志</legend>
+  <div id="log"></div>
+</fieldset>
+
+<script src="tbe.js"></script>
+<script src="frame.js"></script>
+<script src="exporter.js"></script>
+<script>
+const logBox = document.querySelector('#log');
+function log(message, kind) {
+  const line = document.createElement('div');
+  if (kind) line.className = kind;
+  line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+  logBox.appendChild(line);
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function esc(value) {
+  return String(value).replace(/[&<>"]/g, (ch) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
+document.querySelector('#ping').onclick = async () => {
+  const endpoint = document.querySelector('#endpoint').value.trim();
+  const token = document.querySelector('#token').value.trim();
+  const result = document.querySelector('#pingResult');
+  try {
+    const base = TBEExport.loopbackOrigin(endpoint);
+    const response = await fetch(base + '/ping', {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    result.textContent = '连接正常（回环）';
+    result.className = 'ok';
+    log('接收端连接成功: ' + base);
+  } catch (error) {
+    result.textContent = '连接失败: ' + error.message;
+    result.className = 'bad';
+    log('连接失败: ' + error.message, 'bad');
+  }
+};
+
+let databases = [];
+document.querySelector('#scan').onclick = async () => {
+  const target = document.querySelector('#schema');
+  target.innerHTML = '<p class="muted">扫描中…</p>';
+  try {
+    databases = await TBEExport.listDatabases();
+    if (!databases.length) {
+      target.innerHTML = '<p class="warn">当前源没有可见的 IndexedDB 数据库。</p>';
+      return;
+    }
+    let html = '';
+    for (const info of databases) {
+      const database = await TBEExport.openDatabase(info.name);
+      const schema = TBEExport.describeSchema(database);
+      database.close();
+      html += '<h3>数据库 <code>' + esc(info.name) + '</code>（版本 ' + info.version + '）</h3>';
+      html += '<table><thead><tr><th>选择</th><th>store</th><th>keyPath</th><th>autoIncrement</th><th>索引</th></tr></thead><tbody>';
+      for (const store of schema) {
+        const indexText = store.indexes.map((idx) =>
+          esc(idx.name) + ' (' + esc(JSON.stringify(idx.keyPath)) +
+          (idx.unique ? ', unique' : '') + (idx.multiEntry ? ', multiEntry' : '') + ')').join('<br>') || '<span class="muted">无</span>';
+        html += '<tr><td><input type="checkbox" class="storePick" data-db="' +
+          esc(info.name) + '" data-store="' + esc(store.name) + '"></td>' +
+          '<td><code>' + esc(store.name) + '</code></td>' +
+          '<td><code>' + esc(JSON.stringify(store.keyPath)) + '</code></td>' +
+          '<td>' + store.autoIncrement + '</td><td>' + indexText + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+    target.innerHTML = html;
+    document.querySelector('#export').disabled = false;
+    log('扫描到 ' + databases.length + ' 个数据库');
+  } catch (error) {
+    target.innerHTML = '<p class="bad">扫描失败: ' + esc(error.message) + '</p>';
+    log('扫描失败: ' + error.message, 'bad');
+  }
+};
+
+document.querySelector('#export').onclick = async () => {
+  const picks = Array.from(document.querySelectorAll('.storePick:checked'));
+  if (!picks.length) {
+    log('请至少选择一个对象仓库', 'warn');
+    return;
+  }
+  const byDatabase = new Map();
+  for (const pick of picks) {
+    if (!byDatabase.has(pick.dataset.db)) byDatabase.set(pick.dataset.db, []);
+    byDatabase.get(pick.dataset.db).push(pick.dataset.store);
+  }
+  if (byDatabase.size > 1) {
+    log('一次导出只能覆盖同一个数据库内的 store，以保证单个事务快照；请分库分别导出。', 'warn');
+    return;
+  }
+  const [databaseName, storeNames] = [...byDatabase.entries()][0];
+  const button = document.querySelector('#export');
+  button.disabled = true;
+  const progress = document.querySelector('#progress');
+  try {
+    log('开始导出数据库 ' + databaseName + ' 的 store: ' + storeNames.join(', '));
+    const result = await TBEExport.runExport({
+      endpoint: document.querySelector('#endpoint').value.trim(),
+      token: document.querySelector('#token').value.trim(),
+      databaseName,
+      stores: storeNames,
+      chunkBytes: Number(document.querySelector('#chunkBytes').value),
+      onProgress: (state) => {
+        progress.textContent = '块 ' + state.chunksAcked + '/' + state.chunk +
+          ' 已确认，帧 ' + state.frame + '，记录 ' +
+          Object.entries(state.records).map(([k, v]) => k + '=' + v).join(', ') +
+          '，字节 ' + state.bytes;
+      }
+    });
+    log('导出完成: ' + result.exportId, 'ok');
+    log('完整 store: ' + result.report.filter((r) => r.complete).map((r) => r.name).join(', '), 'ok');
+    const dangling = result.report.reduce((sum, r) => sum + r.danglingRefs.length, 0);
+    log('二进制对象 ' + result.report.reduce((s, r) => s + r.binary.length, 0) +
+        ' 个，未解析关联 ' + dangling + ' 条');
+  } catch (error) {
+    log('导出失败，本次结果已标记为 failed/半包，需重新导出: ' + error.message, 'bad');
+  } finally {
+    button.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
